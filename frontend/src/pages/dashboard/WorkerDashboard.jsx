@@ -3,11 +3,16 @@ import { AuthContext } from '../../context/AuthContext';
 import API from '../../api/axios';
 import { Briefcase, Users, CheckCircle, Clock } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import SkillEditor from '../../components/common/SkillEditor';
 
 const WorkerDashboard = () => {
-    const { user } = useContext(AuthContext);
+    const { user, login } = useContext(AuthContext);
+    const navigate = useNavigate();
     const [myProposals, setMyProposals] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [skills, setSkills] = useState(user?.skills || []);
+    const [savingSkills, setSavingSkills] = useState(false);
 
     useEffect(() => {
         const fetchMyProposals = async () => {
@@ -21,7 +26,11 @@ const WorkerDashboard = () => {
             }
         };
         fetchMyProposals();
-    }, []);
+    }, [user]);
+
+    useEffect(() => {
+        console.log('User object:', user);
+    }, [user]);
 
     if (loading) return <div className="p-20 text-center">Loading your dashboard...</div>;
 
@@ -31,6 +40,25 @@ const WorkerDashboard = () => {
                 <div className="mb-8">
                     <h1 className="text-3xl font-bold text-gray-900">Welcome back, {user?.name}!</h1>
                     <p className="text-gray-600 mt-2">Manage your proposals and find new opportunities.</p>
+                    {user && user._id && (
+                        <SkillEditor
+                            skills={skills}
+                            onSave={async (newSkills) => {
+                                setSavingSkills(true);
+                                try {
+                                    await API.put('/user/profile', { skills: newSkills });
+                                    const res = await API.get('/auth/me');
+                                    login(res.data.user, localStorage.getItem('token'));
+                                    setSkills(newSkills);
+                                } catch (err) {
+                                    alert('Failed to update skills');
+                                } finally {
+                                    setSavingSkills(false);
+                                }
+                            }}
+                        />
+                    )}
+                    {savingSkills && <span className="text-xs text-gray-500 ml-2">Saving...</span>}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
@@ -79,7 +107,11 @@ const WorkerDashboard = () => {
                     ) : (
                         <div className="space-y-4">
                             {myProposals.map(proposal => (
-                                <div key={proposal._id} className="border rounded-lg p-4 hover:shadow-md transition">
+                                <div
+                                    key={proposal._id}
+                                    className="border rounded-lg p-4 hover:shadow-md transition cursor-pointer"
+                                    onClick={() => proposal.jobId && navigate(`/jobs/${proposal.jobId._id}`)}
+                                >
                                     <div className="flex justify-between items-start">
                                         <div>
                                             <h3 className="font-semibold text-gray-900">{proposal.jobId ? proposal.jobId.title : 'Job not found'}</h3>
@@ -99,6 +131,7 @@ const WorkerDashboard = () => {
                                             <Link
                                                 to={`/chat/${proposal.jobId._id}`}
                                                 className="px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 transition"
+                                                onClick={e => e.stopPropagation()}
                                             >
                                                 Message Client
                                             </Link>

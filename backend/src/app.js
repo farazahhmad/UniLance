@@ -18,6 +18,8 @@ const authRoutes = require("./routes/authRoutes");
 const testRoutes = require("./routes/testRoutes");
 const jobRoutes = require("./routes/jobRoutes");
 const proposalRoutes = require("./routes/proposalRoutes");
+const chatRoutes = require('./routes/chatRoutes');
+app.use('/api/chat', chatRoutes);
 app.use("/api/auth", authRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/jobs', jobRoutes);

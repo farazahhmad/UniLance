@@ -1,146 +1,230 @@
-import { useState, useEffect, useContext } from 'react';
+import { useState, useEffect, useContext, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { useParams } from 'react-router-dom';
 import { AuthContext } from '../../context/AuthContext';
-import { Send } from 'lucide-react';
-
-const socket = io("http://localhost:3000", {
-    transports: ["websocket", "polling"],
-});
+import API from '../../api/axios';
+import { Send, CheckCircle } from 'lucide-react';
 
 const ChatPage = () => {
-    const { roomId } = useParams(); // Use Job ID as the Room ID
+    const { roomId } = useParams(); 
     const { user } = useContext(AuthContext);
     const [message, setMessage] = useState("");
     const [chatLog, setChatLog] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const scrollRef = useRef();
+    const socketRef = useRef(null);
 
+    // Initialize socket connection
     useEffect(() => {
-        if (!roomId) return;
-
-        setChatLog([]);
-        console.log('Emitting join_room', roomId, 'connected?', socket.connected);
-        socket.emit("join_room", roomId);
-
-        socket.on("receive_message", (data) => {
-            console.log('receive_message event', data);
-            // Avoid duplicates: check if message already exists
-            setChatLog((prev) => {
-                const isDuplicate = prev.some(msg => msg.message === data.message && msg.senderId === data.senderId);
-                if (isDuplicate) return prev;
-                return [...prev, data];
+        if (!socketRef.current) {
+            socketRef.current = io("http://localhost:3000", {
+                transports: ["websocket", "polling"],
             });
-        });
+            
+            socketRef.current.on('connect', () => {
+                console.log('Socket connected:', socketRef.current.id);
+            });
 
-        socket.on("connect", () => {
-            console.log("Socket connected:", socket.id, "roomId:", roomId);
-        });
-
-        socket.on("connect_error", (err) => {
-            console.error("Socket connect error:", err);
-        });
-
-        socket.on("disconnect", (reason) => {
-            console.warn("Socket disconnected:", reason);
-        });
+            socketRef.current.on('disconnect', () => {
+                console.log('Socket disconnected');
+            });
+        }
 
         return () => {
-            socket.off("receive_message");
-            socket.off("connect");
-            socket.off("connect_error");
-            socket.off("disconnect");
+            // Don't disconnect, just cleanup listeners
         };
+    }, []);
+
+    // 1. Load Chat History from MongoDB on Mount
+    useEffect(() => {
+        const fetchHistory = async () => {
+            try {
+                const res = await API.get(`/chat/history/${roomId}`);
+                console.log('Loaded chat history:', res.data.messages);
+                // Map DB fields to the state format
+                const history = res.data.messages.map(msg => ({
+                    room: msg.jobId,
+                    author: msg.senderName,
+                    senderId: msg.senderId,
+                    message: msg.text,
+                    time: new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }));
+                setChatLog(history);
+            } catch (err) {
+                console.error("Failed to load history", err);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        if (roomId) fetchHistory();
     }, [roomId]);
 
-    const sendMessage = (e) => {
+    // 2. Socket.io Real-time Listeners
+    useEffect(() => {
+        if (!roomId || !socketRef.current) {
+            console.warn('Socket not ready:', { roomId, socketReady: !!socketRef.current });
+            return;
+        }
+
+        const socket = socketRef.current;
+        console.log('=== SETTING UP SOCKET LISTENERS ===');
+        console.log('Joining room:', roomId);
+        console.log('Socket connected:', socket.connected);
+        console.log('Socket listeners before join:', socket.listeners('receive_message'));
+        
+        socket.emit("join_room", roomId);
+
+        const handleReceiveMessage = (data) => {
+            console.log('=== MESSAGE RECEIVED ===');
+            console.log('Raw data:', data);
+            console.log('Current user ID:', user?._id);
+            console.log('Sender ID:', data.senderId);
+            
+            setChatLog((prev) => {
+                // Prevent duplicate messages
+                const isDuplicate = prev.some(msg => 
+                    msg.message === data.message && 
+                    msg.senderId === data.senderId &&
+                    msg.author === data.author
+                );
+                if (isDuplicate) {
+                    console.log('Duplicate message prevented');
+                    return prev;
+                }
+                console.log('Adding message to chatLog. New length:', prev.length + 1);
+                return [...prev, data];
+            });
+        };
+
+        socket.on("receive_message", handleReceiveMessage);
+        console.log('receive_message listener attached');
+
+        return () => {
+            console.log('Cleaning up receive_message listener');
+            socket.off("receive_message", handleReceiveMessage);
+        };
+    }, [roomId, user?._id]);
+
+    // 3. Auto-scroll to bottom
+    useEffect(() => {
+        scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [chatLog]);
+
+    const sendMessage = async (e) => {
         if (e) e.preventDefault();
-        if (!message.trim() || !roomId) return;
+        if (!message.trim() || !roomId) {
+            console.warn('Cannot send message:', { 
+                hasMessage: !!message.trim(), 
+                hasRoomId: !!roomId,
+                hasSocket: !!socketRef.current,
+                hasUser: !!user
+            });
+            return;
+        }
 
         const messageData = {
             room: roomId,
-            author: user?.name || "Me",
+            author: user?.name || "User",
             senderId: user?._id,
             message: message.trim(),
             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
 
-        console.log('Sending message', messageData);
-        setChatLog((prev) => [...prev, messageData]);
-        socket.emit("send_message", messageData);
+        console.log('=== SENDING MESSAGE ===');
+        console.log('Message data:', messageData);
+        console.log('User ID:', user?._id);
+        console.log('Socket connected:', socketRef.current?.connected);
+        console.log('Socket ID:', socketRef.current?.id);
+        
+        // Emit to server - server will broadcast back to all clients including sender
+        socketRef.current.emit("send_message", messageData, (ack) => {
+            console.log('Server acknowledgement:', ack);
+        });
+        
         setMessage("");
     };
 
-    const handleDelivery = () => {
-        // Add your delivery handler logic here
-        console.log('Marked as delivered');
-    };
+    if (loading) return <div className="h-screen flex items-center justify-center text-white bg-slate-900">Loading conversation...</div>;
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
-            {/* Phone Frame Container */}
-            <div className="w-full max-w-md h-[600px] bg-black rounded-3xl shadow-2xl overflow-hidden border-8 border-gray-900 flex flex-col">
-                {/* Chat Header */}
-                <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-4 shadow-lg flex items-center gap-3">
-                    <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center text-blue-600 font-bold text-sm">U</div>
+            <div className="w-full max-w-md h-[700px] bg-black rounded-[3rem] shadow-2xl overflow-hidden border-[12px] border-gray-900 flex flex-col relative">
+                
+                {/* Header */}
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-5 shadow-lg flex items-center gap-3">
+                    <div className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center text-white font-bold border border-white/30">
+                        {user?.role === 'worker' ? 'C' : 'W'}
+                    </div>
                     <div className="flex-1">
-                        <h2 className="font-bold text-white">Project Discussion</h2>
-                        <p className="text-xs text-blue-100 flex items-center gap-1">
-                            <span className="w-2 h-2 bg-green-400 rounded-full"></span>
-                            Active Now
+                        <h2 className="font-bold text-white text-sm">Project Discussion</h2>
+                        <p className="text-[10px] text-blue-100 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+                            Encrypted & Secure
                         </p>
                     </div>
                 </div>
 
                 {/* Messages Area */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#f8f9fa] custom-scrollbar">
                     {chatLog.length === 0 ? (
-                        <div className="h-full flex items-center justify-center">
-                            <div className="text-center">
-                                <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-2">
-                                    <Send size={24} className="text-gray-400" />
-                                </div>
-                                <p className="text-gray-400 text-sm">No messages yet</p>
-                            </div>
+                        <div className="h-full flex flex-col items-center justify-center text-gray-400">
+                            <Send size={40} className="mb-2 opacity-20" />
+                            <p className="text-xs">No messages yet. Start the conversation!</p>
                         </div>
                     ) : (
                         chatLog.map((msg, index) => {
-                            const isOwnMessage = msg.senderId && user?._id && msg.senderId === user._id;
+                            const isOwnMessage = msg.senderId === user?._id;
                             return (
                                 <div key={index} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
-                                    <div className={`max-w-[75%] px-4 py-2 rounded-2xl shadow-sm ${isOwnMessage ? "bg-blue-500 text-white rounded-br-none" : "bg-gray-300 text-gray-900 rounded-bl-none"}`}>
-                                        {!isOwnMessage && <p className="text-xs opacity-70 mb-1 font-semibold text-gray-700">{msg.author}</p>}
-                                        <p className="text-sm break-words">{msg.message}</p>
-                                        <p className={`text-[11px] mt-1 ${isOwnMessage ? "text-blue-100" : "text-gray-600"}`}>{msg.time}</p>
+                                    <div className={`max-w-[80%] px-4 py-2 rounded-2xl shadow-sm ${
+                                        isOwnMessage 
+                                        ? "bg-blue-600 text-white rounded-br-none" 
+                                        : "bg-white text-gray-800 border border-gray-200 rounded-bl-none"
+                                    }`}>
+                                        {!isOwnMessage && (
+                                            <p className="text-[10px] font-black uppercase tracking-wider text-blue-600 mb-1">
+                                                {msg.author}
+                                            </p>
+                                        )}
+                                        <p className="text-sm leading-relaxed">{msg.message}</p>
+                                        <p className={`text-[9px] mt-1 text-right ${isOwnMessage ? "text-blue-100" : "text-gray-400"}`}>
+                                            {msg.time}
+                                        </p>
                                     </div>
                                 </div>
                             );
                         })
                     )}
+                    <div ref={scrollRef} />
                 </div>
 
                 {/* Input Area */}
-                <form onSubmit={sendMessage} className="p-3 bg-white border-t flex flex-col gap-2">
-                    <div className="flex gap-2">
-                        <input 
-                            type="text" 
-                            value={message}
-                            placeholder="Type a message..."
-                            className="flex-1 p-3 bg-gray-100 border border-gray-300 rounded-full outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
-                            onChange={(e) => setMessage(e.target.value)}
-                        />
-                        <button type="submit" className="p-3 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition flex-shrink-0">
-                            <Send size={18} />
-                        </button>
-                    </div>
-                    {user?.role === 'worker' && (
-                        <button 
-                            onClick={handleDelivery}
-                            type="button"
-                            className="w-full bg-green-600 text-white px-4 py-2 rounded-full text-sm font-semibold hover:bg-green-700 transition"
-                        >
-                            Mark as Delivered
-                        </button>
-                    )}
-                </form>
+                <div className="p-4 bg-white border-t">
+                    <form onSubmit={sendMessage} className="flex flex-col gap-3">
+                        <div className="flex gap-2 bg-gray-100 p-1 rounded-full border border-gray-200 focus-within:border-blue-400 transition shadow-inner">
+                            <input 
+                                type="text" 
+                                value={message}
+                                placeholder="Write a message..."
+                                className="flex-1 p-2 bg-transparent outline-none text-sm px-4"
+                                onChange={(e) => setMessage(e.target.value)}
+                            />
+                            <button type="submit" className="p-2 bg-blue-600 text-white rounded-full hover:scale-105 active:scale-95 transition shadow-md">
+                                <Send size={18} />
+                            </button>
+                        </div>
+                        
+                        {user?.role === 'worker' && (
+                            <button 
+                                type="button"
+                                className="w-full flex items-center justify-center gap-2 bg-emerald-600 text-white py-2 rounded-xl text-xs font-bold hover:bg-emerald-700 transition uppercase tracking-widest shadow-lg"
+                            >
+                                <CheckCircle size={14}/> Mark as Delivered
+                            </button>
+                        )}
+                    </form>
+                </div>
             </div>
         </div>
     );

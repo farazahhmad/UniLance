@@ -7,6 +7,8 @@ const app = require("./src/app");
 // 3. Import DB connection
 const connectDB = require("./src/config/db");
 
+const Message = require('./src/models/MessageModel'); // Import the model
+
 // 4. Define PORT
 const PORT = process.env.PORT || 5000;
 
@@ -22,28 +24,50 @@ const io = new Server(server, {
 });
 
 io.on('connection', (socket) => {
-  console.log('User Connected:', socket.id);
+    console.log('New user connected:', socket.id);
 
-  // Join a private room based on the "Job ID" or "Chat ID"
-  socket.on('join_room', (data) => {
-    console.log(`join_room event from ${socket.id} for room:`, data);
-    socket.join(data);
-    console.log(`User joined room: ${data}`);
-  });
+    socket.on('join_room', (roomId) => {
+        socket.join(roomId);
+        console.log(`${socket.id} joined room: ${roomId}`);
+    });
 
-  socket.on('send_message', (data) => {
-    console.log('send_message event received:', data);
-    if (!data?.room) {
-      console.warn('send_message received without room:', data);
-      return;
-    }
-    // Send to everyone else in the room, sender will handle local display
-    socket.to(data.room).emit('receive_message', data);
-  });
+    socket.on('send_message', async (data) => {
+        console.log('Message received:', data);
+        
+        if (!data.room || !data.message) {
+            console.error('Invalid message data:', data);
+            socket.emit('error', { message: 'Invalid message format' });
+            return;
+        }
 
-  socket.on('disconnect', () => {
-    console.log('User Disconnected', socket.id);
-  });
+        // 1. Save to MongoDB
+        try {
+            const newMessage = new Message({
+                jobId: data.room,
+                senderId: data.senderId,
+                senderName: data.author,
+                text: data.message
+            });
+            const savedMessage = await newMessage.save();
+            console.log('Message saved to DB:', savedMessage._id);
+
+            // 2. Broadcast to everyone in the room (including sender)
+            const messageWithTimestamp = {
+                ...data,
+                _id: savedMessage._id,
+                createdAt: savedMessage.createdAt
+            };
+            console.log('Broadcasting to room:', data.room, messageWithTimestamp);
+            io.to(data.room).emit('receive_message', messageWithTimestamp);
+        } catch (err) {
+            console.error("Message save failed:", err);
+            socket.emit('error', { message: 'Failed to save message' });
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('User disconnected:', socket.id);
+    });
 });
 
 // 5. Connect DB and Start server
